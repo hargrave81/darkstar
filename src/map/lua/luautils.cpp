@@ -2497,7 +2497,7 @@ namespace luautils
 
         if (prepFile(File, "onPetRoam"))
         {
-            return -1;
+            return false;
         }
 
         Lunar<CLuaBaseEntity>::push(LuaHandle, &LuaMobEntity);
@@ -2507,7 +2507,7 @@ namespace luautils
         {
             ShowError("luautils::onPetRoam: %s\n", lua_tostring(LuaHandle, -1));
             lua_pop(LuaHandle, 1);
-            return -1;
+            return false;
         }
         bool casted = (!lua_isnil(LuaHandle, -1) && lua_isboolean(LuaHandle, -1) ? (bool)lua_toboolean(LuaHandle, -1) : 0);
         lua_pop(LuaHandle, 1);
