@@ -310,7 +310,6 @@ void SmallPacket0x00A(map_session_data_t* session, CCharEntity* PChar, CBasicPac
 
     if (!PChar->loc.zoning)
     {
-        PChar->StatusEffectContainer->DelStatusEffectsByFlag(EFFECTFLAG_ON_ZONE, true);
         charutils::ClearTempItems(PChar);
     }
 
@@ -440,7 +439,6 @@ void SmallPacket0x00D(map_session_data_t* session, CCharEntity* PChar, CBasicPac
 
     charutils::SaveCharStats(PChar);
     charutils::SaveCharExp(PChar, PChar->GetMJob());
-    charutils::SaveCharUnlocks(PChar);
 
     PChar->status = STATUS_DISAPPEAR;
     return;
@@ -942,11 +940,23 @@ void SmallPacket0x028(map_session_data_t* session, CCharEntity* PChar, CBasicPac
     if (PItem != nullptr && !PItem->isSubType(ITEM_LOCKED))
     {
         uint16 ItemID = PItem->getID();
+        // Break linkshell if the main shell was disposed of.
+        CItemLinkshell* ItemLinkshell = dynamic_cast<CItemLinkshell*>(PItem);
+        if (ItemLinkshell && ItemLinkshell->GetLSType() == LSTYPE_LINKSHELL)
+        {
+            uint32 lsid = ItemLinkshell->GetLSID();
+            CLinkshell* PLinkshell = linkshell::GetLinkshell(lsid);
+            if (!PLinkshell)
+            {
+                PLinkshell = linkshell::LoadLinkshell(lsid);
+            }
+            PLinkshell->BreakLinkshell((int8*)PLinkshell->getName(), false);
+            linkshell::UnloadLinkshell(lsid);
+        }
 
         if (charutils::UpdateItem(PChar, container, slotID, -quantity) != 0)
         {
-            // TODO: Break linkshell if the main shell was disposed of.
-            // ShowNotice(CL_CYAN"Player %s DROPPING itemID %u \n" CL_RESET, PChar->GetName(), ItemID);
+            // ShowNotice(CL_CYAN"Player %s DROPPING itemID %u (quantity: %u)\n" CL_RESET, PChar->GetName(), ItemID, quantity);
             PChar->pushPacket(new CMessageStandardPacket(nullptr, ItemID, quantity, MsgStd::ThrowAway));
             PChar->pushPacket(new CInventoryFinishPacket());
         }
@@ -2492,7 +2502,10 @@ void SmallPacket0x050(map_session_data_t* session, CCharEntity* PChar, CBasicPac
     uint8 containerID = data.ref<uint8>(0x06);     // container id
 
     if (containerID != LOC_INVENTORY && containerID != LOC_WARDROBE && containerID != LOC_WARDROBE2 && containerID != LOC_WARDROBE3 && containerID != LOC_WARDROBE4)
-        return;
+        if (equipSlotID != 16 && equipSlotID != 17)
+            return;
+        else if (containerID != LOC_MOGSATCHEL && containerID != LOC_MOGSACK && containerID != LOC_MOGCASE)
+            return;
 
     charutils::EquipItem(PChar, slotID, equipSlotID, containerID); //current
     charutils::SaveCharEquip(PChar);
@@ -2589,7 +2602,7 @@ void SmallPacket0x053(map_session_data_t* session, CCharEntity* PChar, CBasicPac
             auto PItem = itemutils::GetItem(itemId);
             if (PItem == nullptr || !(PItem->isType(ITEM_WEAPON) || PItem->isType(ITEM_EQUIPMENT)))
                 itemId = 0;
-            else if (!(((CItemArmor*)PItem)->getEquipSlotId() & (1 << equipSlotId)))
+            else if (!(((CItemEquipment*)PItem)->getEquipSlotId() & (1 << equipSlotId)))
                 itemId = 0;
 
             PChar->styleItems[equipSlotId] = itemId;
@@ -2681,9 +2694,12 @@ void SmallPacket0x05A(map_session_data_t* session, CCharEntity* PChar, CBasicPac
 
 void SmallPacket0x05B(map_session_data_t* session, CCharEntity* PChar, CBasicPacket data)
 {
-    uint16 EventID = data.ref<uint16>(0x12);
-    uint32 Result = data.ref<uint32>(0x08);
+    auto CharID = data.ref<uint32>(0x04);
+    auto Result = data.ref<uint32>(0x08);
+    auto ZoneID = data.ref<uint16>(0x10);
+    auto EventID = data.ref<uint16>(0x12);
 
+    PrintPacket(data);
     if (PChar->m_event.EventID == EventID)
     {
         if (PChar->m_event.Option != 0) Result = PChar->m_event.Option;
@@ -2715,26 +2731,36 @@ void SmallPacket0x05B(map_session_data_t* session, CCharEntity* PChar, CBasicPac
 
 void SmallPacket0x05C(map_session_data_t* session, CCharEntity* PChar, CBasicPacket data)
 {
-    uint16 EventID = data.ref<uint16>(0x1A);
+    auto CharID = data.ref<uint32>(0x10);
+    auto Result = data.ref<uint32>(0x14);
+    auto ZoneID = data.ref<uint16>(0x18);
 
+    auto EventID = data.ref<uint16>(0x1A);
+
+    PrintPacket(data);
     if (PChar->m_event.EventID == EventID)
     {
-        PChar->loc.p.x = data.ref<float>(0x04);
-        PChar->loc.p.y = data.ref<float>(0x08);
-        PChar->loc.p.z = data.ref<float>(0x0C);
-        PChar->loc.p.rotation = data.ref<uint8>(0x1F);
+        bool updatePosition = false;
 
         if (data.ref<uint8>(0x1E) != 0)
         {
-            luautils::OnEventUpdate(PChar, EventID, 0);
+            updatePosition = luautils::OnEventUpdate(PChar, EventID, Result) == 1;
         }
         else
         {
-            luautils::OnEventFinish(PChar, EventID, 0);
+            updatePosition = luautils::OnEventFinish(PChar, EventID, Result) == 1;
             if (PChar->m_event.EventID == EventID)
             {
                 PChar->m_event.reset();
             }
+        }
+
+        if (updatePosition)
+        {
+            PChar->loc.p.x = data.ref<float>(0x04);
+            PChar->loc.p.y = data.ref<float>(0x08);
+            PChar->loc.p.z = data.ref<float>(0x0C);
+            PChar->loc.p.rotation = data.ref<uint8>(0x1F);
         }
 
         PChar->pushPacket(new CCSPositionPacket(PChar));
@@ -4185,8 +4211,8 @@ void SmallPacket0x0B6(map_session_data_t* session, CCharEntity* PChar, CBasicPac
         char escaped_recipient[16 * 2 + 1];
         Sql_EscapeString(SqlHandle, escaped_recipient, (const char*)data[5]);
 
-        std::string escaped_full_string; escaped_full_string.reserve(strlen((const char*)data[6]) * 2 + 1);
-        Sql_EscapeString(SqlHandle, escaped_full_string.data(), (const char*)data[6]);
+        std::string escaped_full_string; escaped_full_string.reserve(strlen((const char*)data[20]) * 2 + 1);
+        Sql_EscapeString(SqlHandle, escaped_full_string.data(), (const char*)data[20]);
 
         const char* fmtQuery = "INSERT into audit_chat (speaker,type,recipient,message,datetime) VALUES('%s','TELL','%s','%s',current_timestamp())";
         if (Sql_Query(SqlHandle, fmtQuery, escaped_speaker, escaped_recipient, escaped_full_string.data()) == SQL_ERROR)
@@ -4285,6 +4311,7 @@ void SmallPacket0x0C3(map_session_data_t* session, CCharEntity* PChar, CBasicPac
         {
             PItemLinkPearl->setQuantity(1);
             memcpy(PItemLinkPearl->m_extra, PItemLinkshell->m_extra, 24);
+            PItemLinkPearl->SetLSType(LSTYPE_LINKPEARL);
             charutils::AddItem(PChar, LOC_INVENTORY, PItemLinkPearl);
         }
     }
@@ -4300,10 +4327,10 @@ void SmallPacket0x0C3(map_session_data_t* session, CCharEntity* PChar, CBasicPac
 void SmallPacket0x0C4(map_session_data_t* session, CCharEntity* PChar, CBasicPacket data)
 {
     uint8 SlotID = data.ref<uint8>(0x06);
+    uint8 LocationID = data.ref<uint8>(0x07);
     uint8 action = data.ref<uint8>(0x08);
     uint8 lsNum = data.ref<uint8>(0x1B);
-
-    CItemLinkshell* PItemLinkshell = (CItemLinkshell*)PChar->getStorage(LOC_INVENTORY)->GetItem(SlotID);
+    CItemLinkshell* PItemLinkshell = (CItemLinkshell*)PChar->getStorage(LocationID)->GetItem(SlotID);
 
     if (PItemLinkshell != nullptr && PItemLinkshell->isType(ITEM_LINKSHELL))
     {
@@ -4327,8 +4354,9 @@ void SmallPacket0x0C4(map_session_data_t* session, CCharEntity* PChar, CBasicPac
                 if (PItemLinkshell == nullptr)
                     return;
                 PItemLinkshell->setQuantity(1);
-                PChar->getStorage(LOC_INVENTORY)->InsertItem(PItemLinkshell, SlotID);
+                PChar->getStorage(LocationID)->InsertItem(PItemLinkshell, SlotID);
                 PItemLinkshell->SetLSID(LinkshellID);
+                PItemLinkshell->SetLSType(LSTYPE_LINKSHELL);
                 PItemLinkshell->setSignature(EncodedName); //because apparently the format from the packet isn't right, and is missing terminators
                 PItemLinkshell->SetLSColor(LinkshellColor);
 
@@ -4340,7 +4368,7 @@ void SmallPacket0x0C4(map_session_data_t* session, CCharEntity* PChar, CBasicPac
                 if (Sql_Query(SqlHandle, Query, DecodedName, extra, PChar->id, SlotID) != SQL_ERROR &&
                     Sql_AffectedRows(SqlHandle) != 0)
                 {
-                    PChar->pushPacket(new CInventoryItemPacket(PItemLinkshell, LOC_INVENTORY, SlotID));
+                    PChar->pushPacket(new CInventoryItemPacket(PItemLinkshell, LocationID, SlotID));
                 }
             }
             else
@@ -4382,9 +4410,22 @@ void SmallPacket0x0C4(map_session_data_t* session, CCharEntity* PChar, CBasicPac
             break;
             case 1: // equip linkshell
             {
-                if (PItemLinkshell->GetLSID() == 0) // linkshell no exists, item is unusable
+                auto ret = Sql_Query(SqlHandle, "SELECT broken FROM linkshells WHERE linkshellid = %u LIMIT 1", PItemLinkshell->GetLSID());
+                if (ret != SQL_ERROR && Sql_NumRows(SqlHandle) != 0 && Sql_NextRow(SqlHandle) == SQL_SUCCESS && Sql_GetUIntData(SqlHandle, 0) == 1)
+                { // if the linkshell has been broken, break the item
+                    PItemLinkshell->SetLSType(LSTYPE_BROKEN);
+                    char extra[sizeof(PItemLinkshell->m_extra) * 2 + 1];
+                    Sql_EscapeStringLen(SqlHandle, extra, (const char*)PItemLinkshell->m_extra, sizeof(PItemLinkshell->m_extra));
+                    const char* Query = "UPDATE char_inventory SET extra = '%s' WHERE charid = %u AND location = %u AND slot = %u LIMIT 1";
+                    Sql_Query(SqlHandle, Query, extra, PChar->id, PItemLinkshell->getLocationID(), PItemLinkshell->getSlotID());
+                    PChar->pushPacket(new CInventoryItemPacket(PItemLinkshell, PItemLinkshell->getLocationID(), PItemLinkshell->getSlotID()));
+                    PChar->pushPacket(new CInventoryFinishPacket());
+                    PChar->pushPacket(new CMessageSystemPacket(0, 0, 110)); // That linkshell group no longer exists. This item is unusable.
+                    return;
+                }
+                if (PItemLinkshell->GetLSID() == 0)
                 {
-                    PChar->pushPacket(new CMessageSystemPacket(0, 0, 110));
+                    PChar->pushPacket(new CMessageSystemPacket(0, 0, 110)); // That linkshell group no longer exists. This item is unusable.
                     return;
                 }
                 if (OldLinkshell != nullptr) // switching linkshell group
@@ -4404,7 +4445,7 @@ void SmallPacket0x0C4(map_session_data_t* session, CCharEntity* PChar, CBasicPac
                 PItemLinkshell->setSubType(ITEM_LOCKED);
 
                 PChar->equip[slot] = SlotID;
-                PChar->equipLoc[slot] = LOC_INVENTORY;
+                PChar->equipLoc[slot] = LocationID;
                 if (lsNum == 1)
                 {
                     PChar->nameflags.flags |= FLAG_LINKSHELL;
@@ -4419,7 +4460,7 @@ void SmallPacket0x0C4(map_session_data_t* session, CCharEntity* PChar, CBasicPac
             charutils::SaveCharEquip(PChar);
 
             PChar->pushPacket(new CLinkshellEquipPacket(PChar, lsNum));
-            PChar->pushPacket(new CInventoryItemPacket(PItemLinkshell, LOC_INVENTORY, SlotID));
+            PChar->pushPacket(new CInventoryItemPacket(PItemLinkshell, LocationID, SlotID));
         }
         PChar->pushPacket(new CInventoryFinishPacket());
         PChar->pushPacket(new CCharUpdatePacket(PChar));
@@ -4702,41 +4743,35 @@ void SmallPacket0x0DD(map_session_data_t* session, CCharEntity* PChar, CBasicPac
             }
             else
             {
-                uint32 baseExp = charutils::GetRealExp(PChar->GetMLevel(), PTarget->GetMLevel());
+                uint8 mobLvl = PTarget->GetMLevel();
+                EMobDifficulty mobCheck = charutils::CheckMob(PChar->GetMLevel(), mobLvl);
+
+                // Calculate main /check message (64 is Too Weak)
+                int32 MessageValue = 64 + (uint8)mobCheck;
+
+                // Grab mob and player stats for extra messaging
                 uint16 charAcc = PChar->ACC(SLOT_MAIN, (uint8)0);
                 uint16 charAtt = PChar->ATT();
-                uint8 mobLvl = PTarget->GetMLevel();
                 uint16 mobEva = PTarget->EVA();
                 uint16 mobDef = PTarget->DEF();
 
-                uint8 MessageValue = 0;
+                // Calculate +/- message
+                uint16 MessageID = 174; // Default even def/eva
 
-                // NOTE: message 0x41: Incredibly Easy Prey
-                if (baseExp >= 400) MessageValue = 0x47;
-                else if (baseExp >= 240) MessageValue = 0x46;
-                else if (baseExp >= 120) MessageValue = 0x45;
-                else if (baseExp == 100) MessageValue = 0x44;
-                else if (baseExp >= 75) MessageValue = 0x43;
-                else if (baseExp >= 15) MessageValue = 0x42;
-                else if (baseExp == 0) MessageValue = 0x40;
-                if (mobDef > charAtt && (mobEva - 30) > charAcc)
-                    PChar->pushPacket(new CMessageBasicPacket(PChar, PTarget, mobLvl, MessageValue, 170));//high eva high def
-                else if ((mobDef * 1.25) > charAtt && mobDef <= charAtt && (mobEva - 30) > charAcc)
-                    PChar->pushPacket(new CMessageBasicPacket(PChar, PTarget, mobLvl, MessageValue, 171));//high eva
-                else if ((mobDef * 1.25) <= charAtt && (mobEva - 30) > charAcc)
-                    PChar->pushPacket(new CMessageBasicPacket(PChar, PTarget, mobLvl, MessageValue, 172));//high eva low def
-                else if (mobDef > charAtt && (mobEva - 30) <= charAcc && (mobEva + 10) > charAcc)
-                    PChar->pushPacket(new CMessageBasicPacket(PChar, PTarget, mobLvl, MessageValue, 173));//high def
-                else if ((mobDef * 1.25) <= charAtt && (mobEva - 30) <= charAcc && (mobEva + 10) > charAcc)
-                    PChar->pushPacket(new CMessageBasicPacket(PChar, PTarget, mobLvl, MessageValue, 175));//low def
-                else if (mobDef > charAtt && (mobEva + 10) <= charAcc)
-                    PChar->pushPacket(new CMessageBasicPacket(PChar, PTarget, mobLvl, MessageValue, 176));//low eva high def
-                else if ((mobDef * 1.25) > charAtt && mobDef <= charAtt && (mobEva + 10) <= charAcc)
-                    PChar->pushPacket(new CMessageBasicPacket(PChar, PTarget, mobLvl, MessageValue, 177));//low eva
-                else if ((mobDef * 1.25) <= charAtt && (mobEva + 10) <= charAcc)
-                    PChar->pushPacket(new CMessageBasicPacket(PChar, PTarget, mobLvl, MessageValue, 178));//low eva low def
-                else
-                    PChar->pushPacket(new CMessageBasicPacket(PChar, PTarget, mobLvl, MessageValue, 174));//broke even
+                // Offsetting the message ID by a certain amount for each stat gives us the correct message
+                // Defense is +/- 1
+                // Evasion is +/- 3
+                if (mobDef > charAtt) // High Defesne
+                    MessageID -= 1;
+                else if ((mobDef * 1.25) <= charAtt) // Low Defense
+                    MessageID += 1;
+
+                if ((mobEva - 30) > charAcc) // High Evasion
+                    MessageID -= 3;
+                else if ((mobEva + 10) <= charAcc)
+                    MessageID += 3;
+
+                PChar->pushPacket(new CMessageBasicPacket(PChar, PTarget, mobLvl, MessageValue, MessageID));
             }
         }
         break;
@@ -4871,15 +4906,29 @@ void SmallPacket0x0E2(map_session_data_t* session, CCharEntity* PChar, CBasicPac
     {
         switch (data.ref<uint8>(0x04) & 0xF0)
         {
-        case 0x20: // Establish right to change the message..
+        case 0x20: // Establish right to change the message.
         {
-            // TODO: ....
+            if (PItemLinkshell->GetLSType() == LSTYPE_LINKSHELL)
+            {
+                switch (data.ref<uint8>(0x05))
+                {
+                case 0x00:
+                    PChar->PLinkshell1->setPostRights(LSTYPE_LINKSHELL);
+                break;
+                case 0x04:
+                    PChar->PLinkshell1->setPostRights(LSTYPE_PEARLSACK);
+                break;
+                case 0x08:
+                    PChar->PLinkshell1->setPostRights(LSTYPE_LINKPEARL);
+                break;
+                }
+                return;     
+            }
         }
         break;
         case 0x40: // Change Message
         {
-            if (PItemLinkshell->GetLSType() == LSTYPE_LINKSHELL ||
-                PItemLinkshell->GetLSType() == LSTYPE_PEARLSACK)
+            if (static_cast<uint8>(PItemLinkshell->GetLSType()) <= PChar->PLinkshell1->m_postRights)
             {
                 PChar->PLinkshell1->setMessage(data[16], PChar->GetName());
                 return;
@@ -4888,7 +4937,7 @@ void SmallPacket0x0E2(map_session_data_t* session, CCharEntity* PChar, CBasicPac
         break;
         }
     }
-    PChar->pushPacket(new CLinkshellMessagePacket(nullptr, nullptr, nullptr, 0, 1)); // you are not authorized to this action
+    PChar->pushPacket(new CMessageSystemPacket(0, 0, 158)); // You do not have access to those linkshell commands.
     return;
 }
 
@@ -5489,7 +5538,11 @@ void SmallPacket0x100(map_session_data_t* session, CCharEntity* PChar, CBasicPac
             else if (prevsjob == JOB_BLU)
                 blueutils::UnequipAllBlueSpells(PChar);
 
-            uint16 subType = PChar->m_Weapons[SLOT_SUB]->getDmgType();
+            uint16 subType = 0;
+            if (auto weapon = dynamic_cast<CItemWeapon*>(PChar->m_Weapons[SLOT_SUB]))
+            {
+                subType = weapon->getDmgType();
+            }
 
             if (subType > 0 && subType < 4)
             {
